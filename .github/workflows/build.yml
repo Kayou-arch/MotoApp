@@ -9,6 +9,11 @@ on:
 permissions:
   contents: write   # pour publier l'APK et supprimer les anciens zips
 
+# Une seule compilation à la fois : les envois rapprochés attendent leur tour
+concurrency:
+  group: build-apk
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -59,14 +64,20 @@ jobs:
 
       - name: Supprimer les anciens zips du dépôt
         run: |
-          KEEP="${{ steps.z.outputs.zip }}"
-          OLD=0
-          for f in *.zip; do
-            if [ "$f" != "$KEEP" ]; then git rm -q -- "$f"; OLD=1; fi
-          done
-          if [ "$OLD" = 1 ]; then
-            git config user.name "github-actions"
-            git config user.email "github-actions@users.noreply.github.com"
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          # Repart toujours de l'état le plus récent du dépôt (évite « rejected / fetch first »)
+          for essai in 1 2 3; do
+            git fetch -q origin "$GITHUB_REF_NAME"
+            git reset -q --hard "origin/$GITHUB_REF_NAME"
+            KEEP=$(ls *.zip | sort -V | tail -1)
+            OLD=0
+            for f in *.zip; do
+              if [ "$f" != "$KEEP" ]; then git rm -q -- "$f"; OLD=1; fi
+            done
+            if [ "$OLD" = 0 ]; then echo "Rien à nettoyer"; exit 0; fi
             git commit -q -m "Nettoyage : garde seulement $KEEP [skip ci]"
-            git push
-          fi
+            if git push -q; then echo "Gardé : $KEEP"; exit 0; fi
+            echo "Le dépôt a bougé, nouvel essai…"; sleep 5
+          done
+          exit 1
