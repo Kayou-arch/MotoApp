@@ -1,18 +1,72 @@
 name: Build APK
-on: [push, workflow_dispatch]
+
+# Se lance quand tu envoies un zip (ou à la main depuis l'onglet Actions)
+on:
+  push:
+    paths: ['*.zip', '.github/workflows/build.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # pour publier l'APK et supprimer les anciens zips
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: unzip -o MotoApp.zip
+      - uses: actions/checkout@v5
+
+      - name: Choisir le zip le plus récent
+        id: z
+        run: |
+          Z=$(ls *.zip | sort -V | tail -1)
+          V=$(echo "$Z" | sed -nE 's/.*[vV]([0-9]+(\.[0-9]+)+).*/\1/p')
+          [ -z "$V" ] && V="0.0.${{ github.run_number }}"
+          echo "zip=$Z" >> "$GITHUB_OUTPUT"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Zip utilisé : $Z  →  version $V"
+
+      - name: Décompresser
+        run: |
+          rm -rf src && mkdir src && unzip -q -o "${{ steps.z.outputs.zip }}" -d src
+          echo "SRC=$(dirname "$(find src -name settings.gradle.kts | head -1)")" >> "$GITHUB_ENV"
+
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: 17 }
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: "8.9" }
-      - run: gradle assembleDebug
-        working-directory: MotoApp
-      - uses: actions/upload-artifact@v4
+
+      - name: Compiler
+        run: gradle assembleDebug
+        working-directory: ${{ env.SRC }}
+
+      - name: Nommer l'APK
+        run: cp "$SRC/app/build/outputs/apk/debug/app-debug.apk" "RidePlay-v${{ steps.z.outputs.version }}.apk"
+
+      # L'APK est publié dans « Releases » : téléchargeable directement, sans dézipper
+      - uses: softprops/action-gh-release@v2
         with:
-          name: moto-apk
-          path: MotoApp/app/build/outputs/apk/debug/app-debug.apk
+          tag_name: v${{ steps.z.outputs.version }}
+          name: RidePlay v${{ steps.z.outputs.version }}
+          files: RidePlay-v${{ steps.z.outputs.version }}.apk
+          make_latest: true
+
+      - name: Garder seulement les 3 dernières versions publiées
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 100 --json tagName -q '.[].tagName' | tail -n +4 | \
+            while IFS= read -r t; do gh release delete "$t" --yes --cleanup-tag; done
+
+      - name: Supprimer les anciens zips du dépôt
+        run: |
+          KEEP="${{ steps.z.outputs.zip }}"
+          OLD=0
+          for f in *.zip; do
+            if [ "$f" != "$KEEP" ]; then git rm -q -- "$f"; OLD=1; fi
+          done
+          if [ "$OLD" = 1 ]; then
+            git config user.name "github-actions"
+            git config user.email "github-actions@users.noreply.github.com"
+            git commit -q -m "Nettoyage : garde seulement $KEEP [skip ci]"
+            git push
+          fi
